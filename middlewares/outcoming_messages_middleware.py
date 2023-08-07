@@ -27,4 +27,5 @@ class OutgoingRequestMiddleware(BaseRequestMiddleware):
                 "bot_id": bot.id,
                 "text": method.text
             })
+            redis_db.incr("outgoing_messages_count")
         return await make_request(bot, method)

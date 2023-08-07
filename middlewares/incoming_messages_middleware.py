@@ -16,4 +16,5 @@ class LoggingMiddleware(BaseMiddleware):
     ) -> Any:
         # Log the message text to Redis
         redis_db.lpush(f"user_{event.from_user.id}_messages", event.text)
+        redis_db.incr("incoming_messages_count")
         return await handler(event, data)

@@ -8,8 +8,9 @@ from aiogram.fsm.state import StatesGroup, State
 from aiogram.fsm.context import FSMContext
 from aiogram import Bot, Dispatcher, Router, types, F
 from aiogram.filters import Command
-from aiogram.methods import GetUpdates
+from aiogram.methods import GetUpdates, Close
 from aiogram.types import Message, ReplyKeyboardRemove
+from aiogram.utils.token import validate_token, TokenValidationError
 
 from config import TOKEN, WEATHER_API_KEY, redis_db
 from helper_functions import is_user_admin
@@ -21,10 +22,6 @@ logging.basicConfig(level=logging.DEBUG)
 router = Router()
 form_router = Router()
 all_router = Router()
-
-#
-# @all_router.message()
-# async def return_message(message: types.Message): pass
 
 
 @router.message(Command(commands=["start"]))
@@ -115,35 +112,54 @@ async def new_bot(message: types.Message):
     if is_user_admin(message.from_user.id):
         api_key = message.text.split()[1]
         is_active = redis_db.sismember('active_tokens', api_key)
-        if is_active:
-            await message.answer('The token is already active!')
-        else:
-            redis_db.sadd("active_tokens", api_key)
-            await message.answer('The token was added, the new bout is now running.')
-            await main()
+        try:
+            validate_token(api_key)
+            if is_active:
+                await message.answer('The token is already active!')
+            else:
+                redis_db.sadd('active_tokens', api_key)
+                redis_db.incr("bots_created")
+                await message.answer('The token was added, the new bot is now running.')
+                await main(first_run=False)
+        except TokenValidationError:
+            await message.answer('The token is invalid, sorry.')
     else:
-        await message.answer("You do no have access to this function.")
+        await message.answer("You do not have access to this function.")
 
 
-async def main() -> None:
+@router.message(Command("statistics"))
+async def statistics(message: types.Message):
+    if is_user_admin(message.from_user.id):
+        incoming_messages, outgoing_messages, bots_created = redis_db.get('incoming_messages_count') or 0,\
+                                                             redis_db.get('outgoing_messages_count') or 0,\
+                                                             redis_db.get("bots_created") or 0
+        await message.answer(f"We received {incoming_messages} incoming messages,"
+                             f" {outgoing_messages} outgoing messages. The {bots_created} were created.")
+    else:
+        await message.answer("You do not have access to this function.")
+
+
+async def main(first_run=True) -> None:
     # Dispatcher is a root router
-
     # Initialize Bot instance with a default parse mode which will be passed to all API calls
-
     bot_tokens = [token for token in redis_db.smembers("active_tokens")]
     bots = []
     for token in bot_tokens:
-        current_bot = Bot(token=token, parse_mode="HTML")
+        try:
+            current_bot = Bot(token=token, parse_mode="HTML")
+        except TokenValidationError:
+            continue
         current_bot.session.middleware(OutgoingRequestMiddleware(ignore_methods=[GetUpdates]))
         bots.append(current_bot)
     dp = Dispatcher()
     router.message.outer_middleware(LoggingMiddleware())
-    dp.include_router(router)
-    dp.include_router(form_router)
-    # And the run events dispatching
+    if first_run:
+        dp.include_routers(router, form_router)
     await dp.start_polling(*bots)
 
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     asyncio.run(main())
+
+
