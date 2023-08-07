@@ -1,34 +1,38 @@
 import requests
-
 import logging
 
-import aiogram.utils.markdown as md
-from aiogram import Bot, Dispatcher, executor, types
-from aiogram.contrib.fsm_storage.memory import MemoryStorage
-from aiogram.dispatcher import FSMContext
-from aiogram.dispatcher.filters import Text
-from aiogram.dispatcher.filters.state import StatesGroup, State
-from aiogram.types import ParseMode
+import asyncio
 
+from aiogram.client.session.middlewares.request_logging import RequestLogging
+from aiogram.fsm.state import StatesGroup, State
+from aiogram.fsm.context import FSMContext
+from aiogram import Bot, Dispatcher, Router, types, F
+from aiogram.filters import Command
+from aiogram.methods import GetUpdates
+from aiogram.types import Message, ReplyKeyboardRemove
 
 from config import TOKEN, WEATHER_API_KEY
+from middlewares.incoming_messages_middleware import LoggingMiddleware
+from middlewares.outcoming_messages_middleware import OutgoingRequestMiddleware
 
-# Configure logging
 logging.basicConfig(level=logging.INFO)
 
-# Initialize bot and dispatcher
-bot = Bot(token=TOKEN)
-storage = MemoryStorage()
-dp = Dispatcher(bot, storage=storage)
+router = Router()
+form_router = Router()
+all_router = Router()
+
+#
+# @all_router.message()
+# async def return_message(message: types.Message): pass
 
 
-@dp.message_handler(commands=['start', 'help'])
+@router.message(Command(commands=["start"]))
 async def send_welcome(message: types.Message):
     """
     This handler will be called when user sends `/start` or `/help` command
     """
     first_name = message.from_user.first_name
-    await bot.send_message(message.from_user.id, f"Welcome, {first_name}.")
+    await message.answer(f"Welcome, {first_name}.")
 
 
 # States
@@ -36,21 +40,18 @@ class WeatherForm(StatesGroup):
     city = State()  # Will be represented in storage as 'Form:gender'
 
 
-@dp.message_handler(commands='weather')
-async def cmd_start(message: types.Message):
-    """
-    Conversation's entry point
-    """
-    # Set state
-    await WeatherForm.city.set()
-
-    await message.reply("Hello! To get the weather, please enter your city name.")
+@router.message(Command(commands=["weather"]))
+async def command_start(message: Message, state: FSMContext) -> None:
+    await state.set_state(WeatherForm.city)
+    await message.answer(
+        "Hello! To get the weather, please enter your city name.",
+        reply_markup=ReplyKeyboardRemove(),
+    )
 
 
-# You can use state '*' if you need to handle all states
-@dp.message_handler(state='*', commands='cancel')
-@dp.message_handler(Text(equals='cancel', ignore_case=True), state='*')
-async def cancel_handler(message: types.Message, state: FSMContext):
+@form_router.message(Command("cancel"))
+@form_router.message(F.text.casefold() == "cancel")
+async def cancel_handler(message: Message, state: FSMContext) -> None:
     """
     Allow user to cancel any action
     """
@@ -58,45 +59,54 @@ async def cancel_handler(message: types.Message, state: FSMContext):
     if current_state is None:
         return
 
-    logging.info('Cancelling state %r', current_state)
-    # Cancel state and inform user about it
-    await state.finish()
-    # And remove keyboard (just in case)
-    await message.reply('Cancelled.', reply_markup=types.ReplyKeyboardRemove())
+    logging.info("Cancelling state %r", current_state)
+    await state.clear()
+    await message.answer(
+        "Cancelled.",
+        reply_markup=ReplyKeyboardRemove(),
+    )
 
 
-@dp.message_handler(state=WeatherForm.city)
+@form_router.message(WeatherForm.city)
 async def process_weather(message: types.Message, state: FSMContext):
-    async with state.proxy() as data:
-        city = message.text
-        url = 'http://api.openweathermap.org/data/2.5/weather'
-        params = {
-            'q': city,
-            'appid': WEATHER_API_KEY,
-            'units': 'metric',  # Use 'imperial' for Fahrenheit
-        }
-        response = requests.get(url, params=params)
-        if response.status_code == 200:
-            data = response.json()
-            weather_description = data['weather'][0]['description']
-            temp = data['main']['temp']
-            country = data['sys']['country']
-            response_text = f"Weather in {city}, {country}: {weather_description}, Temperature: {temp}°C"
-        else:
-            response_text = "Sorry, we were unable to process the weather for your city."
-        markup = types.ReplyKeyboardRemove()
+    await state.set_state(WeatherForm.city)
+    city = message.text
+    url = 'http://api.openweathermap.org/data/2.5/weather'
+    params = {
+        'q': city,
+        'appid': WEATHER_API_KEY,
+        'units': 'metric',  # Use 'imperial' for Fahrenheit
+    }
+    response = requests.get(url, params=params)
+    if response.status_code == 200:
+        data = response.json()
+        weather_description = data['weather'][0]['description']
+        temp = data['main']['temp']
+        country = data['sys']['country']
+        response_text = f"Weather in {city}, {country}: {weather_description}, Temperature: {temp}°C"
+    else:
+        response_text = "Sorry, we were unable to process the weather for your city."
         # And send message
-        await bot.send_message(
-            message.chat.id,
-            md.text(
-                response_text
-            ),
-            reply_markup=markup,
-            parse_mode=ParseMode.MARKDOWN,
-        )
-    # Finish conversation
-    await state.finish()
+    await state.clear()
+    await message.answer(
+        response_text,
+        resize_keyboard=True,
+    )
 
 
-if __name__ == '__main__':
-    executor.start_polling(dp, skip_updates=True)
+async def main() -> None:
+    # Dispatcher is a root router
+    dp = Dispatcher()
+    # ... and all other routers should be attached to Dispatcher
+    router.message.outer_middleware(LoggingMiddleware())
+    dp.include_router(router)
+    dp.include_router(form_router)
+    # Initialize Bot instance with a default parse mode which will be passed to all API calls
+    bot = Bot(TOKEN, parse_mode="HTML")
+    bot.session.middleware(OutgoingRequestMiddleware(ignore_methods=[GetUpdates]))
+    # And the run events dispatching
+    await dp.start_polling(bot)
+
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO)
+    asyncio.run(main())
