@@ -6,7 +6,7 @@ from aiogram.methods import TelegramMethod
 from aiogram.methods.base import TelegramType, Response
 
 from config import redis_db
-from middlewares.incoming_messages_middleware import generate_random_8digit
+from helper_functions import generate_random_8digit
 
 
 class OutgoingRequestMiddleware(BaseRequestMiddleware):
@@ -22,7 +22,7 @@ class OutgoingRequestMiddleware(BaseRequestMiddleware):
     ) -> Response[TelegramType]:
 
         if type(method).__name__ == "SendMessage":
-            redis_db.hset(f"outgoing_request{generate_random_8digit()}", mapping={
+            redis_db.hset(f"outgoing_request_{generate_random_8digit()}", mapping={
                 "method_name": type(method).__name__,
                 "bot_id": bot.id,
                 "text": method.text

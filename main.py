@@ -11,11 +11,12 @@ from aiogram.filters import Command
 from aiogram.methods import GetUpdates
 from aiogram.types import Message, ReplyKeyboardRemove
 
-from config import TOKEN, WEATHER_API_KEY
+from config import TOKEN, WEATHER_API_KEY, redis_db
+from helper_functions import is_user_admin
 from middlewares.incoming_messages_middleware import LoggingMiddleware
 from middlewares.outcoming_messages_middleware import OutgoingRequestMiddleware
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.DEBUG)
 
 router = Router()
 form_router = Router()
@@ -94,18 +95,54 @@ async def process_weather(message: types.Message, state: FSMContext):
     )
 
 
+@router.message(Command("promote"))
+async def promote_admin(message: types.Message):
+    if is_user_admin(message.from_user.id):
+        # Check if a user is mentioned in the command
+        new_admin_id = message.text.split()[1]
+        if not new_admin_id.isdigit():
+            await message.answer(f'The user id can contain digits only. You are doing something wrong, sorry.')
+        # Grant admin privileges to the specified user
+        else:
+            redis_db.sadd('admin_users', new_admin_id)
+            await message.answer(f'The user with id {new_admin_id} is now an admin!')
+    else:
+        await message.answer('You do not have permission to use this command.')
+
+
+@router.message(Command("newbot"))
+async def new_bot(message: types.Message):
+    if is_user_admin(message.from_user.id):
+        api_key = message.text.split()[1]
+        is_active = redis_db.sismember('active_tokens', api_key)
+        if is_active:
+            await message.answer('The token is already active!')
+        else:
+            redis_db.sadd("active_tokens", api_key)
+            await message.answer('The token was added, the new bout is now running.')
+            await main()
+    else:
+        await message.answer("You do no have access to this function.")
+
+
 async def main() -> None:
     # Dispatcher is a root router
+
+    # Initialize Bot instance with a default parse mode which will be passed to all API calls
+
+    bot_tokens = [token for token in redis_db.smembers("active_tokens")]
+    bots = []
+    for token in bot_tokens:
+        current_bot = Bot(token=token, parse_mode="HTML")
+        current_bot.session.middleware(OutgoingRequestMiddleware(ignore_methods=[GetUpdates]))
+        bots.append(current_bot)
     dp = Dispatcher()
-    # ... and all other routers should be attached to Dispatcher
     router.message.outer_middleware(LoggingMiddleware())
     dp.include_router(router)
     dp.include_router(form_router)
-    # Initialize Bot instance with a default parse mode which will be passed to all API calls
-    bot = Bot(TOKEN, parse_mode="HTML")
-    bot.session.middleware(OutgoingRequestMiddleware(ignore_methods=[GetUpdates]))
     # And the run events dispatching
-    await dp.start_polling(bot)
+    await dp.start_polling(*bots)
+
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
